@@ -30,7 +30,7 @@ PROMPT_DICT = {
         "Write a response that appropriately completes the request.\n\n"
         "### Instruction:\n{instruction}\n\n### Response:"
     ),
-}
+}         
 
 
 class InstructionDataset(Dataset):
@@ -42,7 +42,7 @@ class InstructionDataset(Dataset):
             self.ann = self.ann[:200]
 
         self.max_words = max_words
-        tokenizer = Tokenizer(model_path=model_path + "./tokenizer.model")
+        tokenizer = Tokenizer(model_path=model_path + "/tokenizer.model")
         self.tokenizer1 = tokenizer
 
     def __len__(self):
@@ -172,7 +172,7 @@ def main(args):
     print(dataset_train)
     print(dataset_val)
 
-    if True:  # args.distributed:
+    if False:  # args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
         sampler_train = torch.utils.data.DistributedSampler(
@@ -186,12 +186,13 @@ def main(args):
         print("Sampler_train = %s" % str(sampler_train))
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
-
-    if global_rank == 0 and args.log_dir is not None:
-        os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = SummaryWriter(log_dir=args.log_dir)
-    else:
-        log_writer = None
+        sampler_val = torch.utils.data.RandomSampler(dataset_val)
+        
+    # if global_rank == 0 and args.log_dir is not None:
+    os.makedirs(args.log_dir, exist_ok=True)
+    log_writer = SummaryWriter(log_dir=args.log_dir)
+    # else:
+    #     log_writer = None
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
