@@ -172,7 +172,7 @@ def main(args):
     print(dataset_train)
     print(dataset_val)
 
-    if False:  # args.distributed:
+    if True:  # args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
         sampler_train = torch.utils.data.DistributedSampler(
@@ -188,11 +188,11 @@ def main(args):
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.RandomSampler(dataset_val)
         
-    # if global_rank == 0 and args.log_dir is not None:
-    os.makedirs(args.log_dir, exist_ok=True)
-    log_writer = SummaryWriter(log_dir=args.log_dir)
-    # else:
-    #     log_writer = None
+    if global_rank == 0 and args.log_dir is not None:
+        os.makedirs(args.log_dir, exist_ok=True)
+        log_writer = SummaryWriter(log_dir=args.log_dir)
+    else:
+        log_writer = None
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
