@@ -23,20 +23,29 @@ def main():
                     break
     print(counter)
     
-    item_subset_small = []
-    indices = np.random.choice(len(item_subset), 20000)
-    for idx in indices:
-        item_subset_small.append(item_subset[idx])
+    train_data = []
+    test_data = []
     
-    with open('math_data_subset.json', 'w') as f:
-        json.dump(item_subset_small, f, indent=4)
+    indices = np.random.permutation(len(item_subset))
+    train_indices = indices[:50000]
+    test_indices = indices[50000:51000]
+    
+    for idx in train_indices:
+        train_data.append(item_subset[idx])
+    for idx in test_indices:
+        test_data.append(item_subset[idx])
+    
+    with open('math_data_train.json', 'w') as f:
+        json.dump(train_data, f, indent=4)
+    with open('math_data_test.json', 'w') as f:
+        json.dump(test_data, f, indent=4)
 
 
 def combine_alpaca_math():
     with open('alpaca_data.json', 'r') as f:
         dalpaca = json.load(f)
     
-    with open('math_data_subset.json', 'r') as f:
+    with open('math_data_train.json', 'r') as f:
         dmath = json.load(f)
     
     dcombined = dalpaca + dmath
@@ -45,4 +54,4 @@ def combine_alpaca_math():
 
 if __name__ == "__main__":
     main()
-    combine_alpaca_math()
+    # combine_alpaca_math()
