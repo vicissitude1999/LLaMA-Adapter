@@ -13,6 +13,7 @@ import torch
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 
 from llama import LLaMA, ModelArgs, Tokenizer, Transformer
+from format_responses import *
 
 PROMPT_DICT = {
     "prompt_input": (
@@ -63,7 +64,7 @@ def load(
     with open(Path(ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
-    model_args: ModelArgs = ModelArgs(max_seq_len=max_seq_len, max_batch_size=max_batch_size, quantizer=quantizer, **params)
+    model_args: ModelArgs = ModelArgs(max_seq_len=max_seq_len, max_batch_size=max_batch_size, **params)
     model_args.adapter_layer = int(adapter_checkpoint["adapter_query.weight"].shape[0] / model_args.adapter_len)
     tokenizer = Tokenizer(model_path=tokenizer_path)
     model_args.vocab_size = tokenizer.n_words
@@ -91,26 +92,39 @@ def main(
     local_rank, world_size = setup_model_parallel()
     if local_rank > 0:
         sys.stdout = open(os.devnull, "w")
-
+    
+    
+    
     generator = load(ckpt_dir, tokenizer_path, adapter_path, local_rank, world_size, max_seq_len, max_batch_size, quantizer)
+    # instructs = [
+    #     "Tell me about alpacas.",
+    #     "Tell me about the president of Mexico in 2019.",
+    #     "Tell me about the king of France in 2019.",
+    #     "List all Canadian provinces in alphabetical order.",
+    #     "Write a Python program that prints the first 10 Fibonacci numbers.",
+    #     "Write a program that prints the numbers from 1 to 100. But for multiples of three print 'Fizz' instead of the number and for the multiples of five print 'Buzz'. For numbers which are multiples of both three and five print 'FizzBuzz'.",  # noqa: E501
+    #     "Tell me five words that rhyme with 'shock'.",
+    #     "Translate the sentence 'I have no mouth but I must scream' into Spanish.",
+    #     "Count up from 1 to 500.",
+    # ]
+    res = []
+    # instructs = read_questions("question.jsonl")
     instructs = [
-        "Tell me about alpacas.",
-        "Tell me about the president of Mexico in 2019.",
-        "Tell me about the king of France in 2019.",
-        "List all Canadian provinces in alphabetical order.",
-        "Write a Python program that prints the first 10 Fibonacci numbers.",
-        "Write a program that prints the numbers from 1 to 100. But for multiples of three print 'Fizz' instead of the number and for the multiples of five print 'Buzz'. For numbers which are multiples of both three and five print 'FizzBuzz'.",  # noqa: E501
-        "Tell me five words that rhyme with 'shock'.",
-        "Translate the sentence 'I have no mouth but I must scream' into Spanish.",
-        "Count up from 1 to 500.",
+        "Let f(v) = -4*v - 15. What is f(-10)?"
     ]
+      
     prompts = [PROMPT_DICT["prompt_no_input"].format_map({"instruction": x, "input": ""}) for x in instructs]
 
-    results = generator.generate(prompts, max_gen_len=512, temperature=temperature, top_p=top_p)
-
+    for i, prompt in enumerate(prompts):
+        results = generator.generate([prompt], max_gen_len=512, temperature=temperature, top_p=top_p)
+        res.append(results[0])
+    
     for result in results:
         print(result)
         print("\n==================================\n")
+    
+    # save_name = adapter_path.split("/")[-1][:-4]
+    # format_responses("math-adapter", res, f'{save_name}.jsonl')
 
 
 if __name__ == "__main__":
