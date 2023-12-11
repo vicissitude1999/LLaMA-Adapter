@@ -50,7 +50,7 @@ def load(
     world_size: int,
     max_seq_len: int,
     max_batch_size: int,
-    quantizer: bool=False,
+    quantizer: bool=False
 ) -> LLaMA:
     start_time = time.time()
     checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
@@ -83,6 +83,7 @@ def main(
     ckpt_dir: str,
     tokenizer_path: str,
     adapter_path: str,
+    type: str,
     temperature: float = 0.1,
     top_p: float = 0.75,
     max_seq_len: int = 512,
@@ -92,7 +93,6 @@ def main(
     local_rank, world_size = setup_model_parallel()
     if local_rank > 0:
         sys.stdout = open(os.devnull, "w")
-    
     
     
     generator = load(ckpt_dir, tokenizer_path, adapter_path, local_rank, world_size, max_seq_len, max_batch_size, quantizer)
@@ -107,24 +107,29 @@ def main(
     #     "Translate the sentence 'I have no mouth but I must scream' into Spanish.",
     #     "Count up from 1 to 500.",
     # ]
-    res = []
-    # instructs = read_questions("question.jsonl")
-    instructs = [
-        "Let f(v) = -4*v - 15. What is f(-10)?"
-    ]
+    res = {}
+    if type == "math":
+        instructs = read_math("data/math_data_test.json")
+    else:
+        instructs = read_questions("question.jsonl")
+    # instructs = [
+    #     "Let f(v) = -4*v - 15. What is f(-10)?"
+    # ]
       
     prompts = [PROMPT_DICT["prompt_no_input"].format_map({"instruction": x, "input": ""}) for x in instructs]
 
     for i, prompt in enumerate(prompts):
-        results = generator.generate([prompt], max_gen_len=512, temperature=temperature, top_p=top_p)
-        res.append(results[0])
+        if i < 125:
+            print(i)
+            results = generator.generate([prompt], max_gen_len=512, temperature=temperature, top_p=top_p)
+            res[i] = results[0]
+        
+    # for result in results:
+    #     print(result)
+    #     print("\n==================================\n")
     
-    for result in results:
-        print(result)
-        print("\n==================================\n")
-    
-    # save_name = adapter_path.split("/")[-1][:-4]
-    # format_responses("math-adapter", res, f'{save_name}.jsonl')
+    save_name = adapter_path.split("/")[-1][:-4]
+    format_responses("math-adapter", res, f'{save_name}.jsonl')
 
 
 if __name__ == "__main__":

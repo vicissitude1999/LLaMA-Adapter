@@ -21,6 +21,9 @@ def Llama7B_adapter(args, **kwargs):
         max_batch_size=32,
         adapter_len=args.adapter_len,
         adapter_layer=args.adapter_layer,
+        add_bias=args.add_bias,
+        add_scale=args.add_scale,
+        train_norm=args.train_norm,
         **params
     )
     tokenizer = Tokenizer(model_path=llama_model_path + "/tokenizer.model")
