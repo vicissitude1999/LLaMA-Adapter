@@ -1,3 +1,55 @@
+# LLaMA-Adapter Based two-stage QA system
+
+## To train LLaMA-Adapter-Math
+
+Run
+
+```bash
+cd alpaca_finetuning_v1
+
+torchrun --nproc_per_node 8 finetuning.py \
+    --model Llama7B_adapter \
+    --llama_model_path ../models/LLaMA-7B \
+    --data_path ../data/math_data_train.json \
+    --adapter_layer 30 \
+    --adapter_len 10 \
+    --max_seq_len 512 \
+    --batch_size 2 \
+    --epochs 5 \
+    --warmup_epochs 2 \
+    --blr 36e-3 \
+    --weight_decay 0.02 \
+    --output_dir checkpoint/ \
+    --accum_iter 4
+```
+
+## To test LLaMA-Adapter-Math
+
+Run
+
+```bash
+torchrun --nproc_per_node 1 example.py \
+         --ckpt_dir models/LLaMA-7B/ \
+         --tokenizer_path models/LLaMA-7B/tokenizer.model \
+         --adapter_path [path to adapter] \
+         --type math
+```
+
+to generate responses and use format_responses.py to compute accuracy.
+
+## To train LLaMA-Adapter-Math-BT
+
+Replace .model with .model_bt in alpaca_finetuning_v1/llama/__init__.py, and run the same command as LLaMA-Adapter-Math.
+
+## To train LLaMA-Adapter-BT
+
+Run the same command as LLaMA-Adapter-Math except replacing data_path.
+
+
+
+```
+
+
 # LLaMA-Adapter: Efficient Fine-tuning of LLaMA 🚀
 
 ## Announcement: We release **[LLaMA2-Accessory](https://github.com/Alpha-VLLM/LLaMA2-Accessory)**, an open-source toolkit for **pre-training**, **fine-tuning** and **deployment** of **LLMs** and **mutlimodal LLMs**.🔥
