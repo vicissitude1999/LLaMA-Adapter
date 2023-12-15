@@ -53,6 +53,8 @@ def compute_error(path_response_pred, path_response_true):
             item = json.loads(line)
             
             response = item["choices"][0]["turns"][0].split("Response:")[-1]
+            print(response)
+            print("------------------")
             try:
                 response = sympy.Rational(response)
                 response = float(response)
@@ -84,5 +86,5 @@ def compute_error(path_response_pred, path_response_true):
     print(f"min {np.min(diff)} 25% {np.percentile(diff, 25)} 50% {np.percentile(diff, 50)} 75% {np.percentile(diff, 75)} max {np.max(diff)}")
     
 if __name__ == "__main__":
-    compute_error("adapter_adapter_len10_layer30_epoch5.jsonl",
+    compute_error("ckpt/adapter_adapter_len10_layer30_epoch5_deepmindmath50k_bt_bias_norm.jsonl",
                   "data/math_data_test.json")

@@ -5,10 +5,11 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import fairscale.nn.model_parallel.initialize as fs_init
 import torch
 import torch.nn.functional as F
+from fairscale.nn.model_parallel.layers import ColumnParallelLinear, ParallelEmbedding, RowParallelLinear
 from torch import nn
-from torch.nn import Embedding, Linear
 
 
 @dataclass
@@ -22,9 +23,10 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
+
     adapter_len: int = 10
-    adapter_layer: int = 30
-    
+    adapter_layer: int = 8
+        
     add_bias: bool = False
     add_scale: bool = False
     train_norm: bool = False
@@ -72,6 +74,7 @@ def apply_rotary_emb(
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
+
 def forward_linear_with_scale_and_bias(x, module, scale=None, bias=None):
     if scale is not None:
         x = x * scale
@@ -82,21 +85,47 @@ def forward_linear_with_scale_and_bias(x, module, scale=None, bias=None):
     x = x.half()
     return x
 
+
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
 
-        self.n_local_heads = args.n_heads
+        self.n_local_heads = args.n_heads // fs_init.get_model_parallel_world_size()
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wk = Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wv = Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wo = Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        self.wq = ColumnParallelLinear(
+            args.dim,
+            args.n_heads * self.head_dim,
+            bias=False,
+            gather_output=False,
+            init_method=lambda x: x,
+        )
+        self.wk = ColumnParallelLinear(
+            args.dim,
+            args.n_heads * self.head_dim,
+            bias=False,
+            gather_output=False,
+            init_method=lambda x: x,
+        )
+        self.wv = ColumnParallelLinear(
+            args.dim,
+            args.n_heads * self.head_dim,
+            bias=False,
+            gather_output=False,
+            init_method=lambda x: x,
+        )
+        self.wo = RowParallelLinear(
+            args.n_heads * self.head_dim,
+            args.dim,
+            bias=False,
+            input_is_parallel=True,
+            init_method=lambda x: x,
+        )
 
+        self.cache_k = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)).cuda()
+        self.cache_v = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)).cuda()
         self.gate = torch.nn.Parameter(torch.zeros(1, self.n_local_heads, 1, 1))
         
-
         if args.add_bias:
             self.wq_bias, self.wk_bias, self.wv_bias = [
                 nn.Parameter(torch.zeros([self.n_local_heads * self.head_dim], dtype=torch.float16)) for _ in range(3)
@@ -115,9 +144,11 @@ class Attention(nn.Module):
         self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], adapter=None
     ):
         bsz, seqlen, _ = x.shape
+        
         xq = forward_linear_with_scale_and_bias(x, self.wq, self.wq_scale, self.wq_bias)
         xk = forward_linear_with_scale_and_bias(x, self.wk, self.wk_scale, self.wk_bias)
         xv = forward_linear_with_scale_and_bias(x, self.wv, self.wv_scale, self.wv_bias)
+        
         
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_heads, self.head_dim)
@@ -125,36 +156,35 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        self.cache_k = self.cache_k.to(xq)
+        self.cache_v = self.cache_v.to(xq)
+
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
+        keys = self.cache_k[:bsz, : start_pos + seqlen]
+        values = self.cache_v[:bsz, : start_pos + seqlen]
+
         if adapter is not None:
             adapter_len = adapter.shape[1]
             adapter_k = forward_linear_with_scale_and_bias(adapter, self.wk, self.wk_scale, self.wk_bias)
             adapter_k = adapter_k.view(1, adapter_len, self.n_local_heads, self.head_dim).repeat(bsz, 1, 1, 1)
             adapter_v = forward_linear_with_scale_and_bias(adapter, self.wv, self.wv_scale, self.wv_bias)
             adapter_v = adapter_v.view(1, adapter_len, self.n_local_heads, self.head_dim).repeat(bsz, 1, 1, 1)
-            xk = torch.cat([adapter_k, xk], dim=1)
-            xv = torch.cat([adapter_v, xv], dim=1)
-            extra_mask = torch.zeros(1, 1, seqlen, adapter_len).to(mask)
-            mask = torch.cat([extra_mask, mask], dim=-1)
-        keys = xk
-        values = xv
-
+            adapter_k = adapter_k.transpose(1, 2)
+            adapter_v = adapter_v.transpose(1, 2)
         xq = xq.transpose(1, 2)
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
-        if adapter is not None:
-            scores = torch.cat(
-                [
-                    self.gate.tanh().half() * F.softmax(scores[:, :, :, :adapter_len].float(), dim=-1).type_as(xq),
-                    F.softmax(scores[:, :, :, adapter_len:].float(), dim=-1).type_as(xq),
-                ],
-                dim=-1,
-            )
-        else:
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, slen, head_dim)
+        if adapter is not None:
+            adapter_scores = torch.matmul(xq, adapter_k.transpose(2, 3)) / math.sqrt(self.head_dim)
+            adapter_scores = self.gate * F.softmax(adapter_scores.float(), dim=-1).type_as(xq)
+            output = output + torch.matmul(adapter_scores, adapter_v)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
         return self.wo(output)
@@ -173,10 +203,9 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = Linear(dim, hidden_dim, bias=False)
-        self.w2 = Linear(hidden_dim, dim, bias=False)
-        self.w3 = Linear(dim, hidden_dim, bias=False)
-        
+        self.w1 = ColumnParallelLinear(dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x)
+        self.w2 = RowParallelLinear(hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x)
+        self.w3 = ColumnParallelLinear(dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x)
         if add_bias:
             self.w1_bias, self.w3_bias = [nn.Parameter(torch.zeros([hidden_dim], dtype=torch.float16)) for _ in range(2)]
             self.w2_bias = nn.Parameter(torch.zeros([dim], dtype=torch.float16))
@@ -223,50 +252,44 @@ class Transformer(nn.Module):
     def __init__(self, params: ModelArgs):
         super().__init__()
         self.params = params
+        print(params)
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
-        self.tok_embeddings = Embedding(params.vocab_size, params.dim)
 
-        self.adapter_query = nn.Embedding(params.adapter_len * params.adapter_layer, params.dim)
-        self.adapter_len = params.adapter_len
-        self.adapter_layer = params.adapter_layer
-
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=0)
+        self.tok_embeddings = ParallelEmbedding(params.vocab_size, params.dim, init_method=lambda x: x)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = Linear(params.dim, params.vocab_size, bias=False)
+        self.output = ColumnParallelLinear(params.dim, params.vocab_size, bias=False, init_method=lambda x: x)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
+        self.adapter_query = nn.Embedding(params.adapter_len * params.adapter_layer, params.dim)
+        self.adapter_len = params.adapter_len
+        self.adapter_layer = params.adapter_layer
 
-    def forward(self, examples, labels):
+    @torch.inference_mode()
+    def forward(self, tokens: torch.Tensor, start_pos: int):
+        _bsz, seqlen = tokens.shape
+        h = self.tok_embeddings(tokens)
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        prompt = self.adapter_query.weight.reshape(
+            self.params.adapter_layer, self.params.adapter_len, self.params.dim
+        ).unsqueeze(1)
+        mask = None
+        if seqlen > 1:
+            mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
+            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
-        _bsz, seqlen = examples.shape
-
-        with torch.no_grad():
-            h = self.tok_embeddings(examples)
-            freqs_cis = self.freqs_cis.to(h.device)
-            freqs_cis = freqs_cis[:seqlen]
-            mask = None
-            mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=h.device)
-            mask = torch.triu(mask, diagonal=0 + 1).type_as(h)
-            start_pos = 0
-            for layer in self.layers[: -1 * self.adapter_layer]:
-                h = layer(h, start_pos, freqs_cis, mask)
-
-        adapter_index = 0
-        adapter = self.adapter_query.weight.reshape(-1, self.adapter_len, 4096).unsqueeze(1)
-        for layer in self.layers[-1 * self.adapter_layer :]:
-            h = layer(h, start_pos, freqs_cis, mask, adapter[adapter_index].half())
-            adapter_index = adapter_index + 1
-
+        for layer in self.layers[: -1 * self.params.adapter_layer]:
+            h = layer(h, start_pos, freqs_cis, mask)
+        layer_index = 0
+        for layer in self.layers[-1 * self.params.adapter_layer :]:
+            h = layer(h, start_pos, freqs_cis, mask, prompt[layer_index])
+            layer_index = layer_index + 1
         h = self.norm(h)
-        output = self.output(h)
-        output = output[:, :-1, :].reshape(-1, self.vocab_size)
-        labels = labels[:, 1:].flatten()
-
-        c_loss = self.criterion(output, labels)
-        return c_loss
+        output = self.output(h[:, -1, :])  # only compute last logits
+        return output.float()

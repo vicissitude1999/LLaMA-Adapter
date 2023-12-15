@@ -67,7 +67,11 @@ def load(
     model_args: ModelArgs = ModelArgs(max_seq_len=max_seq_len, max_batch_size=max_batch_size, **params)
     model_args.adapter_layer = int(adapter_checkpoint["adapter_query.weight"].shape[0] / model_args.adapter_len)
     tokenizer = Tokenizer(model_path=tokenizer_path)
+    
     model_args.vocab_size = tokenizer.n_words
+    model_args.add_bias = True
+    model_args.add_scale = False
+    model_args.train_norm = True
     torch.set_default_tensor_type(torch.cuda.HalfTensor)
     model = Transformer(model_args)
     print(model)
@@ -129,7 +133,7 @@ def main(
     #     print("\n==================================\n")
     
     save_name = adapter_path.split("/")[-1][:-4]
-    format_responses("math-adapter", res, f'ckpt/{save_name}.jsonl')
+    format_responses("math-adapter", res, f'{save_name}.jsonl')
 
 
 if __name__ == "__main__":
